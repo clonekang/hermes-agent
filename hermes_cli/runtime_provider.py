@@ -268,6 +268,12 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
     config = load_config()
     custom_providers = config.get("custom_providers")
 
+    logger.debug(f"_get_named_custom_provider: requested={requested_provider}, norm={requested_norm}")
+    logger.debug(f"_get_named_custom_provider: custom_providers type={type(custom_providers)}, len={len(custom_providers) if isinstance(custom_providers, list) else 'N/A'}")
+    if isinstance(custom_providers, list):
+        for i, cp in enumerate(custom_providers):
+            logger.debug(f"_get_named_custom_provider: custom_providers[{i}] = {cp}")
+
     # Check if the requested provider matches a custom_providers entry
     if isinstance(custom_providers, list):
         for entry in custom_providers:
@@ -279,6 +285,8 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                 continue
             name_norm = _normalize_custom_provider_name(name)
             menu_key = f"custom:{name_norm}"
+            logger.debug(f"_get_named_custom_provider: checking entry name={name}, norm={name_norm}, menu_key={menu_key}")
+            logger.debug(f"_get_named_custom_provider: requested_norm={requested_norm}, match={requested_norm in {name_norm, menu_key}}")
             if requested_norm in {name_norm, menu_key}:
                 # Found a matching custom provider — return immediately
                 result = {
@@ -289,6 +297,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                 api_mode = _parse_api_mode(entry.get("api_mode"))
                 if api_mode:
                     result["api_mode"] = api_mode
+                logger.debug(f"_get_named_custom_provider: found match! result={result}")
                 return result
 
     # Not found in custom_providers — check if it's a built-in provider
@@ -303,6 +312,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
             # It's a built-in provider, not a custom one
             return None
 
+    logger.debug(f"_get_named_custom_provider: no match found, returning None")
     return None
 
 
@@ -336,14 +346,18 @@ def _resolve_named_custom_runtime(
     ]
     api_key = next((candidate for candidate in api_key_candidates if has_usable_secret(candidate)), "")
 
+    # Use the requested provider name as the provider field
+    # This ensures that subsequent credential resolution uses the correct provider
+    provider_name = custom_provider.get("name", requested_provider)
+
     return {
-        "provider": "custom",
+        "provider": provider_name,
         "api_mode": custom_provider.get("api_mode")
         or _detect_api_mode_for_url(base_url)
         or "chat_completions",
         "base_url": base_url,
         "api_key": api_key or "no-key-required",
-        "source": f"custom_provider:{custom_provider.get('name', requested_provider)}",
+        "source": f"custom_provider:{provider_name}",
     }
 
 
@@ -585,11 +599,14 @@ def resolve_runtime_provider(
     """Resolve runtime provider credentials for agent execution."""
     requested_provider = resolve_requested_provider(requested)
 
+    logger.debug(f"resolve_runtime_provider: requested={requested}, requested_provider={requested_provider}")
+
     custom_runtime = _resolve_named_custom_runtime(
         requested_provider=requested_provider,
         explicit_api_key=explicit_api_key,
         explicit_base_url=explicit_base_url,
     )
+    logger.debug(f"resolve_runtime_provider: custom_runtime={custom_runtime}")
     if custom_runtime:
         custom_runtime["requested_provider"] = requested_provider
         return custom_runtime
