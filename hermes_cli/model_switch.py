@@ -439,12 +439,12 @@ def switch_model(
     # =================================================================
     if explicit_provider:
         # Resolve the provider
-        pdef = resolve_provider_full(explicit_provider, user_providers)
+        pdef = resolve_provider_full(explicit_provider, user_providers, custom_providers)
         if pdef is None:
             _switch_err = (
                 f"Unknown provider '{explicit_provider}'. "
                 f"Check 'hermes model' for available providers, or define it "
-                f"in config.yaml under 'providers:'."
+                f"in config.yaml under 'providers:' or 'custom_providers:'."
             )
             # Check for common config issues that cause provider resolution failures
             try:

@@ -260,11 +260,38 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
     if not requested_norm or requested_norm == "custom":
         return None
 
-    # Raw names should only map to custom providers when they are not already
-    # valid built-in providers or aliases. Explicit menu keys like
-    # ``custom:local`` always target the saved custom provider.
+    # Skip auto resolution
     if requested_norm == "auto":
         return None
+
+    # Load custom_providers first to check if requested name matches
+    config = load_config()
+    custom_providers = config.get("custom_providers")
+
+    # First, check if the requested provider matches a custom_providers entry
+    if isinstance(custom_providers, list):
+        for entry in custom_providers:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            base_url = entry.get("base_url")
+            if not isinstance(name, str) or not isinstance(base_url, str):
+                continue
+            name_norm = _normalize_custom_provider_name(name)
+            menu_key = f"custom:{name_norm}"
+            if requested_norm in {name_norm, menu_key}:
+                # Found a matching custom provider
+                result = {
+                    "name": name.strip(),
+                    "base_url": base_url.strip(),
+                    "api_key": str(entry.get("api_key", "") or "").strip(),
+                }
+                api_mode = _parse_api_mode(entry.get("api_mode"))
+                if api_mode:
+                    result["api_mode"] = api_mode
+                return result
+
+    # If not found in custom_providers, apply original logic for custom: prefix
     if not requested_norm.startswith("custom:"):
         try:
             auth_mod.resolve_provider(requested_norm)
@@ -273,37 +300,28 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
         else:
             return None
 
-    config = load_config()
-    custom_providers = config.get("custom_providers")
-    if not isinstance(custom_providers, list):
-        if isinstance(custom_providers, dict):
-            logger.warning(
-                "custom_providers in config.yaml is a dict, not a list. "
-                "Each entry must be prefixed with '-' in YAML. "
-                "Run 'hermes doctor' for details."
-            )
-        return None
-
-    for entry in custom_providers:
-        if not isinstance(entry, dict):
-            continue
-        name = entry.get("name")
-        base_url = entry.get("base_url")
-        if not isinstance(name, str) or not isinstance(base_url, str):
-            continue
-        name_norm = _normalize_custom_provider_name(name)
-        menu_key = f"custom:{name_norm}"
-        if requested_norm not in {name_norm, menu_key}:
-            continue
-        result = {
-            "name": name.strip(),
-            "base_url": base_url.strip(),
-            "api_key": str(entry.get("api_key", "") or "").strip(),
-        }
-        api_mode = _parse_api_mode(entry.get("api_mode"))
-        if api_mode:
-            result["api_mode"] = api_mode
-        return result
+    # Re-check custom_providers with the original logic for custom: prefix
+    if isinstance(custom_providers, list):
+        for entry in custom_providers:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            base_url = entry.get("base_url")
+            if not isinstance(name, str) or not isinstance(base_url, str):
+                continue
+            name_norm = _normalize_custom_provider_name(name)
+            menu_key = f"custom:{name_norm}"
+            if requested_norm not in {name_norm, menu_key}:
+                continue
+            result = {
+                "name": name.strip(),
+                "base_url": base_url.strip(),
+                "api_key": str(entry.get("api_key", "") or "").strip(),
+            }
+            api_mode = _parse_api_mode(entry.get("api_mode"))
+            if api_mode:
+                result["api_mode"] = api_mode
+            return result
 
     return None
 
