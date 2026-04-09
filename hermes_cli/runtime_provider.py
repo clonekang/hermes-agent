@@ -264,11 +264,11 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
     if requested_norm == "auto":
         return None
 
-    # Load custom_providers first to check if requested name matches
+    # Load custom_providers to check if requested name matches
     config = load_config()
     custom_providers = config.get("custom_providers")
 
-    # First, check if the requested provider matches a custom_providers entry
+    # Check if the requested provider matches a custom_providers entry
     if isinstance(custom_providers, list):
         for entry in custom_providers:
             if not isinstance(entry, dict):
@@ -280,7 +280,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
             name_norm = _normalize_custom_provider_name(name)
             menu_key = f"custom:{name_norm}"
             if requested_norm in {name_norm, menu_key}:
-                # Found a matching custom provider
+                # Found a matching custom provider — return immediately
                 result = {
                     "name": name.strip(),
                     "base_url": base_url.strip(),
@@ -291,37 +291,17 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                     result["api_mode"] = api_mode
                 return result
 
-    # If not found in custom_providers, apply original logic for custom: prefix
+    # Not found in custom_providers — check if it's a built-in provider
+    # Only do this check for non-custom: prefixed names
     if not requested_norm.startswith("custom:"):
         try:
             auth_mod.resolve_provider(requested_norm)
         except AuthError:
+            # Not a built-in provider either
             pass
         else:
+            # It's a built-in provider, not a custom one
             return None
-
-    # Re-check custom_providers with the original logic for custom: prefix
-    if isinstance(custom_providers, list):
-        for entry in custom_providers:
-            if not isinstance(entry, dict):
-                continue
-            name = entry.get("name")
-            base_url = entry.get("base_url")
-            if not isinstance(name, str) or not isinstance(base_url, str):
-                continue
-            name_norm = _normalize_custom_provider_name(name)
-            menu_key = f"custom:{name_norm}"
-            if requested_norm not in {name_norm, menu_key}:
-                continue
-            result = {
-                "name": name.strip(),
-                "base_url": base_url.strip(),
-                "api_key": str(entry.get("api_key", "") or "").strip(),
-            }
-            api_mode = _parse_api_mode(entry.get("api_mode"))
-            if api_mode:
-                result["api_mode"] = api_mode
-            return result
 
     return None
 
