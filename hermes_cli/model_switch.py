@@ -25,7 +25,6 @@ from dataclasses import dataclass
 from typing import List, NamedTuple, Optional
 
 from hermes_cli.providers import (
-    custom_provider_slug,
     determine_api_mode,
     get_label,
     is_aggregator,
