@@ -148,10 +148,6 @@ class ProviderDef:
     doc: str = ""
     source: str = ""                      # "models.dev", "hermes", "user-config"
 
-    @property
-    def is_user_defined(self) -> bool:
-        return self.source == "user-config"
-
 
 # -- Aliases ------------------------------------------------------------------
 # Maps human-friendly / legacy names to canonical provider IDs.
@@ -262,12 +258,6 @@ def normalize_provider(name: str) -> str:
     return ALIASES.get(key, key)
 
 
-def get_overlay(provider_id: str) -> Optional[HermesOverlay]:
-    """Get Hermes overlay for a provider, if one exists."""
-    canonical = normalize_provider(provider_id)
-    return HERMES_OVERLAYS.get(canonical)
-
-
 def get_provider(name: str) -> Optional[ProviderDef]:
     """Look up a provider by id or alias, merging all data sources.
 
@@ -350,37 +340,6 @@ def get_label(provider_id: str) -> str:
     return canonical
 
 
-# For direct import compat, expose as module-level dict
-# Built on demand by get_label() calls
-LABELS: Dict[str, str] = {
-    # Static entries for backward compat — get_label() is the proper API
-    "openrouter": "OpenRouter",
-    "nous": "Nous Portal",
-    "openai-codex": "OpenAI Codex",
-    "copilot-acp": "GitHub Copilot ACP",
-    "github-copilot": "GitHub Copilot",
-    "anthropic": "Anthropic",
-    "zai": "Z.AI / GLM",
-    "kimi-for-coding": "Kimi / Moonshot",
-    "minimax": "MiniMax",
-    "minimax-cn": "MiniMax (China)",
-    "deepseek": "DeepSeek",
-    "alibaba": "Alibaba Cloud (DashScope)",
-    "vercel": "Vercel AI Gateway",
-    "opencode": "OpenCode Zen",
-    "opencode-go": "OpenCode Go",
-    "kilo": "Kilo Gateway",
-    "huggingface": "Hugging Face",
-    "local": "Local endpoint",
-    "custom": "Custom endpoint",
-    # Legacy Hermes IDs (point to same providers)
-    "ai-gateway": "Vercel AI Gateway",
-    "kilocode": "Kilo Gateway",
-    "copilot": "GitHub Copilot",
-    "kimi-coding": "Kimi / Moonshot",
-    "opencode-zen": "OpenCode Zen",
-}
-
 
 def is_aggregator(provider: str) -> bool:
     """Return True when the provider is a multi-model aggregator."""
@@ -452,41 +411,6 @@ def resolve_user_provider(name: str, user_config: Dict[str, Any]) -> Optional[Pr
     )
 
 
-def _resolve_custom_provider_entry(entry: Dict[str, Any], name: str) -> ProviderDef:
-    """Resolve a provider from a custom_providers list entry.
-
-    Args:
-        entry: A single entry from the custom_providers list.
-        name: The provider name.
-
-    Returns:
-        ProviderDef for the custom provider.
-    """
-    # Extract fields from custom_providers entry
-    display_name = entry.get("name", "") or name
-    base_url = entry.get("base_url", "") or ""
-
-    # Determine transport from api_mode field
-    api_mode = entry.get("api_mode", "chat_completions") or "chat_completions"
-    transport_map = {
-        "chat_completions": "openai_chat",
-        "anthropic_messages": "anthropic_messages",
-        "codex_responses": "codex_responses",
-    }
-    transport = transport_map.get(api_mode, "openai_chat")
-
-    return ProviderDef(
-        id=name,
-        name=display_name,
-        transport=transport,
-        api_key_env_vars=(),  # API key is handled separately via credential pool
-        base_url=base_url,
-        is_aggregator=False,
-        auth_type="api_key",
-        source="custom-providers",
-    )
-
-
 def resolve_provider_full(
     name: str,
     user_providers: Optional[Dict[str, Any]] = None,
@@ -522,24 +446,7 @@ def resolve_provider_full(
         if user_pdef is not None:
             return user_pdef
 
-    # 3. Custom providers list from config
-    if custom_providers:
-        # Try canonical name
-        for cp_entry in custom_providers:
-            if not isinstance(cp_entry, dict):
-                continue
-            cp_name = cp_entry.get("name", "")
-            if cp_name and cp_name.lower() == canonical:
-                return _resolve_custom_provider_entry(cp_entry, cp_name)
-        # Try original name (in case alias didn't match)
-        for cp_entry in custom_providers:
-            if not isinstance(cp_entry, dict):
-                continue
-            cp_name = cp_entry.get("name", "")
-            if cp_name and cp_name.lower() == name.strip().lower():
-                return _resolve_custom_provider_entry(cp_entry, cp_name)
-
-    # 4. Try models.dev directly (for providers not in our ALIASES)
+    # 3. Try models.dev directly (for providers not in our ALIASES)
     try:
         from agent.models_dev import get_provider_info as _mdev_provider
         mdev_info = _mdev_provider(canonical)
