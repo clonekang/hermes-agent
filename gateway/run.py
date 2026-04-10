@@ -289,47 +289,21 @@ logger = logging.getLogger(__name__)
 _AGENT_PENDING_SENTINEL = object()
 
 
-def _resolve_runtime_agent_kwargs(session_key: str = None, gateway_runner: "GatewayRunner" = None) -> dict:
-    """Resolve provider credentials for gateway-created AIAgent instances.
-
-    Resolution order (highest to lowest priority):
-        1. Session override from /model command
-        2. HERMES_INFERENCE_PROVIDER environment variable
-        3. Config.yaml model.provider
-    """
+def _resolve_runtime_agent_kwargs() -> dict:
+    """Resolve provider credentials for gateway-created AIAgent instances."""
     from hermes_cli.runtime_provider import (
         resolve_runtime_provider,
         format_runtime_provider_error,
     )
 
-    # Check for session override from /model command first (highest priority)
-    requested_provider = None
-    override_creds = None
-    if session_key and gateway_runner:
-        override = getattr(gateway_runner, "_session_model_overrides", {}).get(session_key, {})
-        if override and override.get("provider"):
-            requested_provider = override.get("provider")
-            override_creds = {
-                "api_key": override.get("api_key"),
-                "base_url": override.get("base_url"),
-                "api_mode": override.get("api_mode"),
-            }
-            logger.debug("Found session override for %s: provider=%s",
-                        session_key, requested_provider)
-
-    # Fall back to HERMES_INFERENCE_PROVIDER env var
-    if not requested_provider:
-        requested_provider = os.getenv("HERMES_INFERENCE_PROVIDER")
-        logger.debug("No session override, using HERMES_INFERENCE_PROVIDER=%s", requested_provider)
-
     try:
         runtime = resolve_runtime_provider(
-            requested=requested_provider,
+            requested=os.getenv("HERMES_INFERENCE_PROVIDER"),
         )
     except Exception as exc:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
 
-    result = {
+    return {
         "api_key": runtime.get("api_key"),
         "base_url": runtime.get("base_url"),
         "provider": runtime.get("provider"),
@@ -338,18 +312,6 @@ def _resolve_runtime_agent_kwargs(session_key: str = None, gateway_runner: "Gate
         "args": list(runtime.get("args") or []),
         "credential_pool": runtime.get("credential_pool"),
     }
-
-    # Apply session override credentials if present (overrides runtime resolution)
-    if override_creds:
-        if override_creds.get("api_key"):
-            result["api_key"] = override_creds["api_key"]
-        if override_creds.get("base_url"):
-            result["base_url"] = override_creds["base_url"]
-        if override_creds.get("api_mode"):
-            result["api_mode"] = override_creds["api_mode"]
-        logger.debug("Applied session override credentials for provider %s", requested_provider)
-
-    return result
 
 
 def _build_media_placeholder(event) -> str:
@@ -687,7 +649,7 @@ class GatewayRunner:
                 return
 
             from run_agent import AIAgent
-            runtime_kwargs = _resolve_runtime_agent_kwargs(session_key=None, gateway_runner=self)
+            runtime_kwargs = _resolve_runtime_agent_kwargs()
             if not runtime_kwargs.get("api_key"):
                 return
 
@@ -3638,7 +3600,6 @@ class GatewayRunner:
                     _cur_provider = current_provider
                     _cur_base_url = current_base_url
                     _cur_api_key = current_api_key
-                    _cur_custom_provs = custom_provs
 
                     async def _on_model_selected(
                         _chat_id: str, model_id: str, provider_slug: str
@@ -3652,6 +3613,8 @@ class GatewayRunner:
                             current_api_key=_cur_api_key,
                             is_global=False,
                             explicit_provider=provider_slug,
+                            user_providers=user_provs,
+                            custom_providers=custom_provs,
                         )
                         if not result.success:
                             return f"Error: {result.error_message}"
@@ -3760,6 +3723,8 @@ class GatewayRunner:
             current_api_key=current_api_key,
             is_global=persist_global,
             explicit_provider=explicit_provider,
+            user_providers=user_provs,
+            custom_providers=custom_provs,
         )
 
         if not result.success:
@@ -4598,11 +4563,10 @@ class GatewayRunner:
             logger.warning("No adapter for platform %s in background task %s", source.platform, task_id)
             return
 
-        session_key = self._session_key_for_source(source)
         _thread_metadata = {"thread_id": source.thread_id} if source.thread_id else None
 
         try:
-            runtime_kwargs = _resolve_runtime_agent_kwargs(session_key=session_key, gateway_runner=self)
+            runtime_kwargs = _resolve_runtime_agent_kwargs()
             if not runtime_kwargs.get("api_key"):
                 await adapter.send(
                     source.chat_id,
@@ -4769,7 +4733,7 @@ class GatewayRunner:
         _thread_meta = {"thread_id": source.thread_id} if source.thread_id else None
 
         try:
-            runtime_kwargs = _resolve_runtime_agent_kwargs(session_key=session_key, gateway_runner=self)
+            runtime_kwargs = _resolve_runtime_agent_kwargs()
             if not runtime_kwargs.get("api_key"):
                 await adapter.send(
                     source.chat_id,
@@ -6774,7 +6738,7 @@ class GatewayRunner:
             model = _resolve_gateway_model(user_config)
 
             try:
-                runtime_kwargs = _resolve_runtime_agent_kwargs(session_key=session_key, gateway_runner=self)
+                runtime_kwargs = _resolve_runtime_agent_kwargs()
             except Exception as exc:
                 return {
                     "final_response": f"⚠️ Provider authentication failed: {exc}",
