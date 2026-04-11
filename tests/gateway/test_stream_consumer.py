@@ -178,6 +178,37 @@ class TestStreamRunMediaStripping:
 
         assert consumer.already_sent
 
+    @pytest.mark.asyncio
+    async def test_buffer_threshold_does_not_bypass_interval_after_first_flush(self):
+        """Crossing buffer_threshold once must not force every later token edit."""
+        adapter = MagicMock()
+        send_result = SimpleNamespace(success=True, message_id="msg_1")
+        edit_result = SimpleNamespace(success=True)
+        adapter.send = AsyncMock(return_value=send_result)
+        adapter.edit_message = AsyncMock(return_value=edit_result)
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        # Large interval + low threshold reproduces the old bug:
+        # after first flush, edits were sent for every tiny delta.
+        config = StreamConsumerConfig(edit_interval=0.4, buffer_threshold=5)
+        consumer = GatewayStreamConsumer(adapter, "chat_123", config)
+
+        task = asyncio.create_task(consumer.run())
+
+        # First delta reaches threshold and sends the initial streamed message.
+        consumer.on_delta("12345")
+        await asyncio.sleep(0.12)
+        assert adapter.send.call_count == 1
+
+        # Small follow-up delta should NOT trigger an immediate edit because
+        # we're still inside edit_interval and new chars are below threshold.
+        consumer.on_delta("a")
+        await asyncio.sleep(0.12)
+        assert adapter.edit_message.call_count == 0
+
+        consumer.finish()
+        await task
+
 
 # ── Segment break (tool boundary) tests ──────────────────────────────────
 
