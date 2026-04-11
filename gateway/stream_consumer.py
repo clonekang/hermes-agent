@@ -78,10 +78,6 @@ class GatewayStreamConsumer:
         self._edit_supported = True  # Disabled on first edit failure (Signal/Email/HA)
         self._last_edit_time = 0.0
         self._last_sent_text = ""   # Track last-sent text to skip redundant edits
-        # Track how much of _accumulated has already been flushed to avoid
-        # treating buffer_threshold as permanently "tripped" once total text
-        # length crosses the threshold.
-        self._last_flushed_len = 0
         self._fallback_final_send = False
         self._fallback_prefix = ""
         self._flood_strikes = 0         # Consecutive flood-control edit failures
@@ -143,7 +139,6 @@ class GatewayStreamConsumer:
                         and self._accumulated)
                     or len(self._accumulated) >= self.cfg.buffer_threshold
                 )
-                should_edit = got_done or got_segment_break or timed_ready
 
                 if should_edit and self._accumulated:
                     # Split overflow: if accumulated text exceeds the platform
@@ -163,7 +158,6 @@ class GatewayStreamConsumer:
                         for chunk in chunks:
                             await self._send_new_chunk(chunk, self._message_id)
                         self._accumulated = ""
-                        self._last_flushed_len = 0
                         self._last_sent_text = ""
                         self._last_edit_time = time.monotonic()
                         if got_done:
@@ -195,7 +189,6 @@ class GatewayStreamConsumer:
                             break
                         self._accumulated = self._accumulated[split_at:].lstrip("\n")
                         self._message_id = None
-                        self._last_flushed_len = 0
                         self._last_sent_text = ""
 
                     display_text = self._accumulated
@@ -203,7 +196,6 @@ class GatewayStreamConsumer:
                         display_text += self.cfg.cursor
 
                     await self._send_or_edit(display_text)
-                    self._last_flushed_len = len(self._accumulated)
                     self._last_edit_time = time.monotonic()
 
                 if got_done:
@@ -236,7 +228,6 @@ class GatewayStreamConsumer:
                 if got_segment_break and self._message_id != "__no_edit__":
                     self._message_id = None
                     self._accumulated = ""
-                    self._last_flushed_len = 0
                     self._last_sent_text = ""
                     self._fallback_final_send = False
                     self._fallback_prefix = ""
