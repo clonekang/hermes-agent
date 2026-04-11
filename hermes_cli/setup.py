@@ -338,6 +338,8 @@ def _curses_prompt_choice(question: str, choices: list, default: int = 0) -> int
                     return
 
         curses.wrapper(_curses_menu)
+        from hermes_cli.curses_ui import flush_stdin
+        flush_stdin()
         return result_holder[0]
     except Exception:
         return -1
@@ -1923,9 +1925,9 @@ def _setup_matrix():
             save_env_value("MATRIX_ENCRYPTION", "true")
             print_success("E2EE enabled")
 
-        matrix_pkg = "matrix-nio[e2e]" if want_e2ee else "matrix-nio"
+        matrix_pkg = "mautrix[encryption]" if want_e2ee else "mautrix"
         try:
-            __import__("nio")
+            __import__("mautrix")
         except ImportError:
             print_info(f"Installing {matrix_pkg}...")
             import subprocess
@@ -2026,6 +2028,12 @@ def _setup_whatsapp():
         print_success("WhatsApp enabled")
         print_info("Run 'hermes whatsapp' to choose your mode (separate bot number")
         print_info("or personal self-chat) and pair via QR code.")
+
+
+def _setup_weixin():
+    """Configure Weixin (personal WeChat) via iLink Bot API QR login."""
+    from hermes_cli.gateway import _setup_weixin as _gateway_setup_weixin
+    _gateway_setup_weixin()
 
 
 def _setup_bluebubbles():
@@ -2147,6 +2155,7 @@ _GATEWAY_PLATFORMS = [
     ("Matrix", "MATRIX_ACCESS_TOKEN", _setup_matrix),
     ("Mattermost", "MATTERMOST_TOKEN", _setup_mattermost),
     ("WhatsApp", "WHATSAPP_ENABLED", _setup_whatsapp),
+    ("Weixin (WeChat)", "WEIXIN_ACCOUNT_ID", _setup_weixin),
     ("BlueBubbles (iMessage)", "BLUEBUBBLES_SERVER_URL", _setup_bluebubbles),
     ("Webhooks (GitHub, GitLab, etc.)", "WEBHOOK_ENABLED", _setup_webhooks),
 ]

@@ -687,6 +687,15 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
         if pconfig.auth_type != "api_key":
             continue
         if provider_id == "anthropic":
+            # Only try anthropic when the user has explicitly configured it.
+            # Without this gate, Claude Code credentials get silently used
+            # as auxiliary fallback when the user's primary provider fails.
+            try:
+                from hermes_cli.auth import is_provider_explicitly_configured
+                if not is_provider_explicitly_configured("anthropic"):
+                    continue
+            except ImportError:
+                pass
             return _try_anthropic()
 
         pool_present, entry = _select_pool_entry(provider_id)
@@ -848,7 +857,7 @@ def _read_main_provider() -> str:
     return ""
 
 
-def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str]]:
+def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """Resolve the active custom/main endpoint the same way the main CLI does.
 
     This covers both env-driven OPENAI_BASE_URL setups and config-saved custom
@@ -861,18 +870,29 @@ def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str]]:
         runtime = resolve_runtime_provider(requested="custom")
     except Exception as exc:
         logger.debug("Auxiliary client: custom runtime resolution failed: %s", exc)
-        return None, None
+        runtime = None
+
+    if not isinstance(runtime, dict):
+        openai_base = os.getenv("OPENAI_BASE_URL", "").strip().rstrip("/")
+        openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if not openai_base:
+            return None, None, None
+        runtime = {
+            "base_url": openai_base,
+            "api_key": openai_key,
+        }
 
     custom_base = runtime.get("base_url")
     custom_key = runtime.get("api_key")
+    custom_mode = runtime.get("api_mode")
     if not isinstance(custom_base, str) or not custom_base.strip():
-        return None, None
+        return None, None, None
 
     custom_base = custom_base.strip().rstrip("/")
     if "openrouter.ai" in custom_base.lower():
         # requested='custom' falls back to OpenRouter when no custom endpoint is
         # configured. Treat that as "no custom endpoint" for auxiliary routing.
-        return None, None
+        return None, None, None
 
     # Local servers (Ollama, llama.cpp, vLLM, LM Studio) don't require auth.
     # Use a placeholder key — the OpenAI SDK requires a non-empty string but
@@ -881,20 +901,33 @@ def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str]]:
     if not isinstance(custom_key, str) or not custom_key.strip():
         custom_key = "no-key-required"
 
-    return custom_base, custom_key.strip()
+    if not isinstance(custom_mode, str) or not custom_mode.strip():
+        custom_mode = None
+
+    return custom_base, custom_key.strip(), custom_mode
 
 
 def _current_custom_base_url() -> str:
-    custom_base, _ = _resolve_custom_runtime()
+    custom_base, _, _ = _resolve_custom_runtime()
     return custom_base or ""
 
 
 def _try_custom_endpoint() -> Tuple[Optional[OpenAI], Optional[str]]:
-    custom_base, custom_key = _resolve_custom_runtime()
+    runtime = _resolve_custom_runtime()
+    if len(runtime) == 2:
+        custom_base, custom_key = runtime
+        custom_mode = None
+    else:
+        custom_base, custom_key, custom_mode = runtime
     if not custom_base or not custom_key:
         return None, None
+    if custom_base.lower().startswith(_CODEX_AUX_BASE_URL.lower()):
+        return None, None
     model = _read_main_model() or "gpt-4o-mini"
-    logger.debug("Auxiliary client: custom endpoint (%s)", model)
+    logger.debug("Auxiliary client: custom endpoint (%s, api_mode=%s)", model, custom_mode or "chat_completions")
+    if custom_mode == "codex_responses":
+        real_client = OpenAI(api_key=custom_key, base_url=custom_base)
+        return CodexAuxiliaryClient(real_client, model), model
     return OpenAI(api_key=custom_key, base_url=custom_base), model
 
 
@@ -1165,6 +1198,18 @@ def _to_async_client(sync_client, model: str):
     return AsyncOpenAI(**async_kwargs), model
 
 
+def _normalize_resolved_model(model_name: Optional[str], provider: str) -> Optional[str]:
+    """Normalize a resolved model for the provider that will receive it."""
+    if not model_name:
+        return model_name
+    try:
+        from hermes_cli.model_normalize import normalize_model_for_provider
+
+        return normalize_model_for_provider(model_name, provider)
+    except Exception:
+        return model_name
+
+
 def resolve_provider_client(
     provider: str,
     model: str = None,
@@ -1227,7 +1272,7 @@ def resolve_provider_client(
             logger.warning("resolve_provider_client: openrouter requested "
                            "but OPENROUTER_API_KEY not set")
             return None, None
-        final_model = model or default
+        final_model = _normalize_resolved_model(model or default, provider)
         return (_to_async_client(client, final_model) if async_mode
                 else (client, final_model))
 
@@ -1238,7 +1283,7 @@ def resolve_provider_client(
             logger.warning("resolve_provider_client: nous requested "
                            "but Nous Portal not configured (run: hermes auth)")
             return None, None
-        final_model = model or default
+        final_model = _normalize_resolved_model(model or default, provider)
         return (_to_async_client(client, final_model) if async_mode
                 else (client, final_model))
 
@@ -1252,7 +1297,7 @@ def resolve_provider_client(
                 logger.warning("resolve_provider_client: openai-codex requested "
                                "but no Codex OAuth token found (run: hermes model)")
                 return None, None
-            final_model = model or _CODEX_AUX_MODEL
+            final_model = _normalize_resolved_model(model or _CODEX_AUX_MODEL, provider)
             raw_client = OpenAI(api_key=codex_token, base_url=_CODEX_AUX_BASE_URL)
             return (raw_client, final_model)
         # Standard path: wrap in CodexAuxiliaryClient adapter
@@ -1261,7 +1306,7 @@ def resolve_provider_client(
             logger.warning("resolve_provider_client: openai-codex requested "
                            "but no Codex OAuth token found (run: hermes model)")
             return None, None
-        final_model = model or default
+        final_model = _normalize_resolved_model(model or default, provider)
         return (_to_async_client(client, final_model) if async_mode
                 else (client, final_model))
 
@@ -1280,7 +1325,10 @@ def resolve_provider_client(
                     "but base_url is empty"
                 )
                 return None, None
-            final_model = model or _read_main_model() or "gpt-4o-mini"
+            final_model = _normalize_resolved_model(
+                model or _read_main_model() or "gpt-4o-mini",
+                provider,
+            )
             extra = {}
             if "api.kimi.com" in custom_base.lower():
                 extra["default_headers"] = {"User-Agent": "KimiCLI/1.30.0"}
@@ -1295,7 +1343,7 @@ def resolve_provider_client(
                        _resolve_api_key_provider):
             client, default = try_fn()
             if client is not None:
-                final_model = model or default
+                final_model = _normalize_resolved_model(model or default, provider)
                 return (_to_async_client(client, final_model) if async_mode
                         else (client, final_model))
         logger.warning("resolve_provider_client: custom/main requested "
@@ -1310,7 +1358,10 @@ def resolve_provider_client(
             custom_base = custom_entry.get("base_url", "").strip()
             custom_key = custom_entry.get("api_key", "").strip() or "no-key-required"
             if custom_base:
-                final_model = model or _read_main_model() or "gpt-4o-mini"
+                final_model = _normalize_resolved_model(
+                    model or _read_main_model() or "gpt-4o-mini",
+                    provider,
+                )
                 client = OpenAI(api_key=custom_key, base_url=custom_base)
                 logger.debug(
                     "resolve_provider_client: named custom provider %r (%s)",
@@ -1342,7 +1393,7 @@ def resolve_provider_client(
             if client is None:
                 logger.warning("resolve_provider_client: anthropic requested but no Anthropic credentials found")
                 return None, None
-            final_model = model or default_model
+            final_model = _normalize_resolved_model(model or default_model, provider)
             return (_to_async_client(client, final_model) if async_mode else (client, final_model))
 
         creds = resolve_api_key_provider_credentials(provider)
@@ -1361,7 +1412,7 @@ def resolve_provider_client(
         )
 
         default_model = _API_KEY_PROVIDER_AUX_MODELS.get(provider, "")
-        final_model = model or default_model
+        final_model = _normalize_resolved_model(model or default_model, provider)
 
         # Provider-specific headers
         headers = {}
@@ -1374,6 +1425,23 @@ def resolve_provider_client(
 
         client = OpenAI(api_key=api_key, base_url=base_url,
                         **({"default_headers": headers} if headers else {}))
+
+        # Copilot GPT-5+ models (except gpt-5-mini) require the Responses
+        # API — they are not accessible via /chat/completions.  Wrap the
+        # plain client in CodexAuxiliaryClient so call_llm() transparently
+        # routes through responses.stream().
+        if provider == "copilot" and final_model and not raw_codex:
+            try:
+                from hermes_cli.models import _should_use_copilot_responses_api
+                if _should_use_copilot_responses_api(final_model):
+                    logger.debug(
+                        "resolve_provider_client: copilot model %s needs "
+                        "Responses API — wrapping with CodexAuxiliaryClient",
+                        final_model)
+                    client = CodexAuxiliaryClient(client, final_model)
+            except ImportError:
+                pass
+
         logger.debug("resolve_provider_client: %s (%s)", provider, final_model)
         return (_to_async_client(client, final_model) if async_mode
                 else (client, final_model))

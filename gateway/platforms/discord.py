@@ -606,22 +606,35 @@ class DiscordAdapter(BasePlatformAdapter):
                         if not self._client.user or self._client.user not in message.mentions:
                             return
                     # "all" falls through to handle_message
-
-                # If the message @mentions other users but NOT the bot, the
-                # sender is talking to someone else — stay silent.  Only
-                # applies in server channels; in DMs the user is always
-                # talking to the bot (mentions are just references).
-                # Controlled by DISCORD_IGNORE_NO_MENTION (default: true).
-                _ignore_no_mention = os.getenv(
-                    "DISCORD_IGNORE_NO_MENTION", "true"
-                ).lower() in ("true", "1", "yes")
-                if _ignore_no_mention and message.mentions and not isinstance(message.channel, discord.DMChannel):
-                    _bot_mentioned = (
+                
+                # Multi-agent filtering: if the message mentions specific bots
+                # but NOT this bot, the sender is talking to another agent —
+                # stay silent.  Messages with no bot mentions (general chat)
+                # still fall through to _handle_message for the existing
+                # DISCORD_REQUIRE_MENTION check.
+                #
+                # This replaces the older DISCORD_IGNORE_NO_MENTION logic
+                # with bot-aware filtering that works correctly when multiple
+                # agents share a channel.
+                if not isinstance(message.channel, discord.DMChannel) and message.mentions:
+                    _self_mentioned = (
                         self._client.user is not None
                         and self._client.user in message.mentions
                     )
-                    if not _bot_mentioned:
-                        return  # Talking to someone else, don't interrupt
+                    _other_bots_mentioned = any(
+                        m.bot and m != self._client.user
+                        for m in message.mentions
+                    )
+                    # If other bots are mentioned but we're not → not for us
+                    if _other_bots_mentioned and not _self_mentioned:
+                        return
+                    # If humans are mentioned but we're not → not for us
+                    # (preserves old DISCORD_IGNORE_NO_MENTION=true behavior)
+                    _ignore_no_mention = os.getenv(
+                        "DISCORD_IGNORE_NO_MENTION", "true"
+                    ).lower() in ("true", "1", "yes")
+                    if _ignore_no_mention and not _self_mentioned and not _other_bots_mentioned:
+                        return
 
                 await self._handle_message(message)
 
@@ -1892,13 +1905,41 @@ class DiscordAdapter(BasePlatformAdapter):
             chat_topic=chat_topic,
         )
 
+        _parent_id = str(getattr(getattr(interaction, "channel", None), "parent_id", "") or "")
+        _skills = self._resolve_channel_skills(thread_id, _parent_id or None)
         event = MessageEvent(
             text=text,
             message_type=MessageType.TEXT,
             source=source,
             raw_message=interaction,
+            auto_skill=_skills,
         )
         await self.handle_message(event)
+
+    def _resolve_channel_skills(self, channel_id: str, parent_id: str | None = None) -> list[str] | None:
+        """Look up auto-skill bindings for a Discord channel/forum thread.
+
+        Config format (in platform extra):
+            channel_skill_bindings:
+              - id: "123456"
+                skills: ["skill-a", "skill-b"]
+        Also checks parent_id so forum threads inherit the forum's bindings.
+        """
+        bindings = self.config.extra.get("channel_skill_bindings", [])
+        if not bindings:
+            return None
+        ids_to_check = {channel_id}
+        if parent_id:
+            ids_to_check.add(parent_id)
+        for entry in bindings:
+            entry_id = str(entry.get("id", ""))
+            if entry_id in ids_to_check:
+                skills = entry.get("skills") or entry.get("skill")
+                if isinstance(skills, str):
+                    return [skills]
+                if isinstance(skills, list) and skills:
+                    return list(dict.fromkeys(skills))  # dedup, preserve order
+        return None
 
     def _thread_parent_channel(self, channel: Any) -> Any:
         """Return the parent text channel when invoked from a thread."""
@@ -2484,6 +2525,10 @@ class DiscordAdapter(BasePlatformAdapter):
         if not event_text or not event_text.strip():
             event_text = "(The user sent a message with no text content)"
 
+        _chan = message.channel
+        _parent_id = str(getattr(_chan, "parent_id", "") or "")
+        _chan_id = str(getattr(_chan, "id", ""))
+        _skills = self._resolve_channel_skills(_chan_id, _parent_id or None)
         event = MessageEvent(
             text=event_text,
             message_type=msg_type,
@@ -2494,6 +2539,7 @@ class DiscordAdapter(BasePlatformAdapter):
             media_types=media_types,
             reply_to_message_id=str(message.reference.message_id) if message.reference else None,
             timestamp=message.created_at,
+            auto_skill=_skills,
         )
 
         # Track thread participation so the bot won't require @mention for

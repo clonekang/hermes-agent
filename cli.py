@@ -319,7 +319,7 @@ def load_cli_config() -> Dict[str, Any]:
     # Load from file if exists
     if config_path.exists():
         try:
-            with open(config_path, "r") as f:
+            with open(config_path, "r", encoding="utf-8") as f:
                 file_config = yaml.safe_load(f) or {}
             
             _file_has_terminal_config = "terminal" in file_config
@@ -1048,7 +1048,7 @@ def _termux_example_image_path(filename: str = "cat.png") -> str:
 
 
 def _split_path_input(raw: str) -> tuple[str, str]:
-    """Split a leading file path token from trailing free-form text.
+    r"""Split a leading file path token from trailing free-form text.
 
     Supports quoted paths and backslash-escaped spaces so callers can accept
     inputs like:
@@ -1719,6 +1719,7 @@ class HermesCLI:
         self._secret_state = None
         self._secret_deadline = 0
         self._spinner_text: str = ""  # thinking spinner text for TUI
+        self._tool_start_time: float = 0.0  # monotonic timestamp when current tool started (for live elapsed)
         self._command_running = False
         self._command_status = ""
         self._attached_images: list[Path] = []
@@ -2027,6 +2028,25 @@ class HermesCLI:
         current_model = (self.model or "").strip()
         changed = False
 
+        try:
+            from hermes_cli.model_normalize import (
+                _AGGREGATOR_PROVIDERS,
+                normalize_model_for_provider,
+            )
+
+            if resolved_provider not in _AGGREGATOR_PROVIDERS:
+                normalized_model = normalize_model_for_provider(current_model, resolved_provider)
+                if normalized_model and normalized_model != current_model:
+                    if not self._model_is_default:
+                        self.console.print(
+                            f"[yellow]⚠️  Normalized model '{current_model}' to '{normalized_model}' for {resolved_provider}.[/]"
+                        )
+                    self.model = normalized_model
+                    current_model = normalized_model
+                    changed = True
+        except Exception:
+            pass
+
         if resolved_provider == "copilot":
             try:
                 from hermes_cli.models import copilot_model_api_mode, normalize_copilot_model_id
@@ -2072,7 +2092,7 @@ class HermesCLI:
             return changed
 
         if resolved_provider != "openai-codex":
-            return False
+            return changed
 
         # 1. Strip provider prefix ("openai/gpt-5.4" → "gpt-5.4")
         if "/" in current_model:
@@ -2111,6 +2131,7 @@ class HermesCLI:
         if not text:
             self._flush_reasoning_preview(force=True)
         self._spinner_text = text or ""
+        self._tool_start_time = 0.0  # clear tool timer when switching to thinking
         self._invalidate()
 
     # ── Streaming display ────────────────────────────────────────────────
@@ -3360,22 +3381,22 @@ class HermesCLI:
             pass  # Don't crash on import errors
     
     def _show_status(self):
-        """Show current status bar."""
+        """Show compact startup status line."""
         # Get tool count
         tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True)
         tool_count = len(tools) if tools else 0
-        
+
         # Format model name (shorten if needed)
         model_short = self.model.split("/")[-1] if "/" in self.model else self.model
         if len(model_short) > 30:
             model_short = model_short[:27] + "..."
-        
+
         # Get API status indicator
         if self.api_key:
             api_indicator = "[green bold]●[/]"
         else:
             api_indicator = "[red bold]●[/]"
-        
+
         # Build status line with proper markup
         toolsets_info = ""
         if self.enabled_toolsets and "all" not in self.enabled_toolsets:
@@ -3390,6 +3411,59 @@ class HermesCLI:
             f"[dim #B8860B]·[/] [bold cyan]{tool_count} tools[/]"
             f"{toolsets_info}{provider_info}"
         )
+
+    def _show_session_status(self):
+        """Show gateway-style status for the current CLI session."""
+        session_meta = {}
+        if self._session_db:
+            try:
+                session_meta = self._session_db.get_session(self.session_id) or {}
+            except Exception:
+                session_meta = {}
+
+        title = (session_meta.get("title") or "").strip()
+
+        created_at = self.session_start
+        started_at = session_meta.get("started_at")
+        if started_at:
+            try:
+                created_at = datetime.fromtimestamp(float(started_at))
+            except Exception:
+                created_at = self.session_start
+
+        updated_at = created_at
+        for field in ("updated_at", "last_updated_at", "last_activity_at"):
+            value = session_meta.get(field)
+            if not value:
+                continue
+            try:
+                updated_at = datetime.fromtimestamp(float(value))
+                break
+            except Exception:
+                pass
+
+        agent = getattr(self, "agent", None)
+        total_tokens = getattr(agent, "session_total_tokens", 0) or 0
+        provider = getattr(self, "provider", None) or "unknown"
+        model = getattr(self, "model", None) or "(unknown)"
+        is_running = bool(getattr(self, "_agent_running", False))
+
+        lines = [
+            "Hermes CLI Status",
+            "",
+            f"Session ID: {self.session_id}",
+            f"Path: {display_hermes_home()}",
+        ]
+        if title:
+            lines.append(f"Title: {title}")
+        lines.extend([
+            f"Model: {model} ({provider})",
+            f"Created: {created_at.strftime('%Y-%m-%d %H:%M')}",
+            f"Last Activity: {updated_at.strftime('%Y-%m-%d %H:%M')}",
+            f"Tokens: {total_tokens:,}",
+            f"Agent Running: {'Yes' if is_running else 'No'}",
+        ])
+        self.console.print("\n".join(lines), highlight=False, markup=False)
     
     def _fast_command_available(self) -> bool:
         try:
@@ -4873,6 +4947,8 @@ class HermesCLI:
                 self._handle_skills_command(cmd_original)
         elif canonical == "platforms":
             self._show_gateway_status()
+        elif canonical == "status":
+            self._show_session_status()
         elif canonical == "statusbar":
             self._status_bar_visible = not self._status_bar_visible
             state = "visible" if self._status_bar_visible else "hidden"
@@ -5759,21 +5835,29 @@ class HermesCLI:
         original_count = len(self.conversation_history)
         try:
             from agent.model_metadata import estimate_messages_tokens_rough
-            approx_tokens = estimate_messages_tokens_rough(self.conversation_history)
+            from agent.manual_compression_feedback import summarize_manual_compression
+            original_history = list(self.conversation_history)
+            approx_tokens = estimate_messages_tokens_rough(original_history)
             print(f"🗜️  Compressing {original_count} messages (~{approx_tokens:,} tokens)...")
 
-            compressed, _new_system = self.agent._compress_context(
-                self.conversation_history,
+            compressed, _ = self.agent._compress_context(
+                original_history,
                 self.agent._cached_system_prompt or "",
                 approx_tokens=approx_tokens,
             )
             self.conversation_history = compressed
-            new_count = len(self.conversation_history)
             new_tokens = estimate_messages_tokens_rough(self.conversation_history)
-            print(
-                f"  ✅ Compressed: {original_count} → {new_count} messages "
-                f"(~{approx_tokens:,} → ~{new_tokens:,} tokens)"
+            summary = summarize_manual_compression(
+                original_history,
+                self.conversation_history,
+                approx_tokens,
+                new_tokens,
             )
+            icon = "🗜️" if summary["noop"] else "✅"
+            print(f"  {icon} {summary['headline']}")
+            print(f"     {summary['token_line']}")
+            if summary["note"]:
+                print(f"     {summary['note']}")
 
         except Exception as e:
             print(f"  ❌ Compression failed: {e}")
@@ -6071,11 +6155,20 @@ class HermesCLI:
         Updates the TUI spinner widget so the user can see what the agent
         is doing during tool execution (fills the gap between thinking
         spinner and next response).  Also plays audio cue in voice mode.
+
+        On tool.started, records a monotonic timestamp so get_spinner_text()
+        can show a live elapsed timer (the TUI poll loop already invalidates
+        every ~0.15s, so the counter updates automatically).
         """
-        # Only act on tool.started; ignore tool.completed, reasoning.available, etc.
+        if event_type == "tool.completed":
+            import time as _time
+            self._tool_start_time = 0.0
+            self._invalidate()
+            return
         if event_type != "tool.started":
             return
         if function_name and not function_name.startswith("_"):
+            import time as _time
             from agent.display import get_tool_emoji
             emoji = get_tool_emoji(function_name)
             label = preview or function_name
@@ -6084,6 +6177,7 @@ class HermesCLI:
             if _pl > 0 and len(label) > _pl:
                 label = label[:_pl - 3] + "..."
             self._spinner_text = f"{emoji} {label}"
+            self._tool_start_time = _time.monotonic()
             self._invalidate()
 
         if not self._voice_mode:
@@ -7925,7 +8019,7 @@ class HermesCLI:
             agent_name = get_active_skin().get_branding("agent_name", "Hermes Agent")
             msg = f"\n{agent_name} has been suspended. Run `fg` to bring {agent_name} back."
             def _suspend():
-                os.write(1, msg.encode())
+                os.write(1, msg.encode("utf-8", errors="replace"))
                 os.kill(0, _sig.SIGTSTP)
             run_in_terminal(_suspend)
 
@@ -8285,6 +8379,17 @@ class HermesCLI:
             txt = cli_ref._spinner_text
             if not txt:
                 return []
+            # Append live elapsed timer when a tool is running
+            t0 = cli_ref._tool_start_time
+            if t0 > 0:
+                import time as _time
+                elapsed = _time.monotonic() - t0
+                if elapsed >= 60:
+                    _m, _s = int(elapsed // 60), int(elapsed % 60)
+                    elapsed_str = f"{_m}m {_s}s"
+                else:
+                    elapsed_str = f"{elapsed:.1f}s"
+                return [('class:hint', f'  {txt}  ({elapsed_str})')]
             return [('class:hint', f'  {txt}')]
 
         def get_spinner_height():
@@ -8819,6 +8924,7 @@ class HermesCLI:
                     finally:
                         self._agent_running = False
                         self._spinner_text = ""
+                        self._tool_start_time = 0.0
 
                         app.invalidate()  # Refresh status line
 

@@ -658,6 +658,19 @@ class TestGetTextAuxiliaryClient:
         assert client is None
         assert model is None
 
+    def test_custom_endpoint_uses_codex_wrapper_when_runtime_requests_responses_api(self):
+        with patch("agent.auxiliary_client._resolve_custom_runtime",
+                   return_value=("https://api.openai.com/v1", "sk-test", "codex_responses")), \
+             patch("agent.auxiliary_client._read_main_model", return_value="gpt-5.3-codex"), \
+             patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            client, model = get_text_auxiliary_client()
+
+        from agent.auxiliary_client import CodexAuxiliaryClient
+        assert isinstance(client, CodexAuxiliaryClient)
+        assert model == "gpt-5.3-codex"
+        assert mock_openai.call_args.kwargs["base_url"] == "https://api.openai.com/v1"
+        assert mock_openai.call_args.kwargs["api_key"] == "sk-test"
+
 
 class TestVisionClientFallback:
     """Vision client auto mode resolves known-good multimodal backends."""
@@ -742,6 +755,69 @@ class TestAuxiliaryPoolAwareness:
         assert call_kwargs["api_key"] == "gh-cli-token"
         assert call_kwargs["base_url"] == "https://api.githubcopilot.com"
         assert call_kwargs["default_headers"]["Editor-Version"]
+
+    def test_copilot_responses_api_model_wrapped_in_codex_client(self, monkeypatch):
+        """Copilot GPT-5+ models (needing Responses API) are wrapped in CodexAuxiliaryClient."""
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+
+        with (
+            patch(
+                "hermes_cli.auth.resolve_api_key_provider_credentials",
+                return_value={
+                    "provider": "copilot",
+                    "api_key": "test-token",
+                    "base_url": "https://api.githubcopilot.com",
+                    "source": "gh auth token",
+                },
+            ),
+            patch("agent.auxiliary_client.OpenAI"),
+        ):
+            client, model = resolve_provider_client("copilot", model="gpt-5.4-mini")
+
+        from agent.auxiliary_client import CodexAuxiliaryClient
+        assert isinstance(client, CodexAuxiliaryClient)
+        assert model == "gpt-5.4-mini"
+
+    def test_copilot_chat_completions_model_not_wrapped(self, monkeypatch):
+        """Copilot models using Chat Completions are returned as plain OpenAI clients."""
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+
+        with (
+            patch(
+                "hermes_cli.auth.resolve_api_key_provider_credentials",
+                return_value={
+                    "provider": "copilot",
+                    "api_key": "test-token",
+                    "base_url": "https://api.githubcopilot.com",
+                    "source": "gh auth token",
+                },
+            ),
+            patch("agent.auxiliary_client.OpenAI") as mock_openai,
+        ):
+            client, model = resolve_provider_client("copilot", model="gpt-4.1-mini")
+
+        from agent.auxiliary_client import CodexAuxiliaryClient
+        assert not isinstance(client, CodexAuxiliaryClient)
+        assert model == "gpt-4.1-mini"
+        # Should be the raw mock OpenAI client
+        assert client is mock_openai.return_value
+
+    def test_vision_auto_uses_active_provider_as_fallback(self, monkeypatch):
+        """When no OpenRouter/Nous available, vision auto falls back to active provider."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "***")
+        with (
+            patch("agent.auxiliary_client._read_nous_auth", return_value=None),
+            patch("agent.auxiliary_client._read_main_provider", return_value="anthropic"),
+            patch("agent.auxiliary_client._read_main_model", return_value="claude-sonnet-4"),
+            patch("agent.anthropic_adapter.build_anthropic_client", return_value=MagicMock()),
+            patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="***"),
+        ):
+            client, model = get_vision_auxiliary_client()
+
+        assert client is not None
+        assert client.__class__.__name__ == "AnthropicAuxiliaryClient"
 
     def test_vision_auto_prefers_active_provider_over_openrouter(self, monkeypatch):
         """Active provider is tried before OpenRouter in vision auto."""
@@ -1111,3 +1187,45 @@ class TestCallLlmPaymentFallback:
                     task="compression",
                     messages=[{"role": "user", "content": "hello"}],
                 )
+
+
+# ---------------------------------------------------------------------------
+# Gate: _resolve_api_key_provider must skip anthropic when not configured
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_api_key_provider_skips_unconfigured_anthropic(monkeypatch):
+    """_resolve_api_key_provider must not try anthropic when user never configured it."""
+    from collections import OrderedDict
+    from hermes_cli.auth import ProviderConfig
+
+    # Build a minimal registry with only "anthropic" so the loop is guaranteed
+    # to reach it without being short-circuited by earlier providers.
+    fake_registry = OrderedDict({
+        "anthropic": ProviderConfig(
+            id="anthropic",
+            name="Anthropic",
+            auth_type="api_key",
+            inference_base_url="https://api.anthropic.com",
+            api_key_env_vars=("ANTHROPIC_API_KEY",),
+        ),
+    })
+
+    called = []
+
+    def mock_try_anthropic():
+        called.append("anthropic")
+        return None, None
+
+    monkeypatch.setattr("agent.auxiliary_client._try_anthropic", mock_try_anthropic)
+    monkeypatch.setattr("hermes_cli.auth.PROVIDER_REGISTRY", fake_registry)
+    monkeypatch.setattr(
+        "hermes_cli.auth.is_provider_explicitly_configured",
+        lambda pid: False,
+    )
+
+    from agent.auxiliary_client import _resolve_api_key_provider
+    _resolve_api_key_provider()
+
+    assert "anthropic" not in called, \
+        "_try_anthropic() should not be called when anthropic is not explicitly configured"
