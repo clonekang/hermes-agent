@@ -5,32 +5,80 @@ Set session model via Telegram Bot API.
 This script sends a /model command to the Telegram bot, which updates
 the session-level model override in gateway memory.
 
-Prerequisites:
-1. Set TELEGRAM_BOT_TOKEN environment variable
-2. Know your chat_id (can be found by messaging @userinfobot or similar)
-
 Usage:
-    # Direct switch using provider:model format
-    ./scripts/set-session-model.py PROVIDER:MODEL CHAT_ID
+    ./scripts/set-session-model.py PROVIDER:MODEL CHAT_ID [--token BOT_TOKEN]
 
-    Examples:
-        ./scripts/set-session-model.py openrouter:sonnet 123456789
-        ./scripts/set-session-model.py nous:mimo "@hermes_bot"
+Examples:
+    # Using token from environment/.env (auto-detected)
+    ./scripts/set-session-model.py openrouter:sonnet 123456789
+
+    # Explicitly specify bot token (useful for multi-bot setups)
+    ./scripts/set-session-model.py nous:mimo "@hermes_bot" --token 123456:ABC-DEF...
+
+Arguments:
+    PROVIDER:MODEL  Model specification (e.g., openrouter:sonnet, nous:mimo)
+    CHAT_ID         Telegram chat ID or username (e.g., 123456789 or @username)
+    --token         Optional: explicitly specify bot token
 """
 
 import sys
 import os
 import requests
 from typing import Optional
+from pathlib import Path
 
 
-def get_telegram_bot_token() -> str:
-    """Get Telegram bot token from environment."""
+def get_telegram_bot_token(explicit_token: str = None) -> str:
+    """Get Telegram bot token.
+
+    Args:
+        explicit_token: Token from --token argument (highest priority)
+
+    Resolution order:
+        1. explicit_token argument
+        2. TELEGRAM_BOT_TOKEN / TELEGRAM_TOKEN environment variable
+        3. ~/.hermes/.env file
+
+    Returns:
+        Bot token string
+
+    Raises:
+        SystemExit: If no token is found
+    """
+    # Priority 1: explicit --token argument
+    if explicit_token:
+        return explicit_token
+
+    # Priority 2: environment variables
     token = os.environ.get('TELEGRAM_BOT_TOKEN') or os.environ.get('TELEGRAM_TOKEN')
+
     if not token:
-        print("Error: TELEGRAM_BOT_TOKEN environment variable not set", file=sys.stderr)
-        print("Set it with: export TELEGRAM_BOT_TOKEN='your_bot_token'", file=sys.stderr)
+        # Try to load from ~/.hermes/.env
+        hermes_home = Path.home() / '.hermes'
+        env_path = hermes_home / '.env'
+
+        if env_path.exists():
+            try:
+                with open(env_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith('TELEGRAM_BOT_TOKEN='):
+                            token = line.split('=', 1)[1].strip().strip('"\'')
+                            break
+                        elif line.startswith('TELEGRAM_TOKEN='):
+                            token = line.split('=', 1)[1].strip().strip('"\'')
+                            break
+            except Exception as e:
+                print(f"Warning: Failed to read .env file: {e}", file=sys.stderr)
+
+    if not token:
+        print("Error: TELEGRAM_BOT_TOKEN not found", file=sys.stderr)
+        print("  Set it with one of these methods:", file=sys.stderr)
+        print("    1. Export environment variable: export TELEGRAM_BOT_TOKEN='your_bot_token'", file=sys.stderr)
+        print("    2. Add to ~/.hermes/.env: TELEGRAM_BOT_TOKEN=your_bot_token", file=sys.stderr)
+        print("    3. Use 'hermes config set TELEGRAM_BOT_TOKEN <token>' command", file=sys.stderr)
         sys.exit(1)
+
     return token
 
 
@@ -60,20 +108,33 @@ def send_telegram_message(bot_token: str, chat_id: str, message: str) -> bool:
 
 
 def main():
-    if len(sys.argv) < 3:
-        print("Usage: ./scripts/set-session-model.py PROVIDER:MODEL CHAT_ID")
-        print("")
-        print("Examples:")
-        print("  ./scripts/set-session-model.py openrouter:sonnet 123456789")
-        print("  ./scripts/set-session-model.py nous:mimo '@hermes_bot'")
-        print("")
-        print("Environment variables required:")
-        print("  TELEGRAM_BOT_TOKEN - Your Telegram bot token")
-        sys.exit(1)
+    import argparse
 
-    # Parse arguments
-    provider_model = sys.argv[1]
-    chat_id = sys.argv[2]
+    parser = argparse.ArgumentParser(
+        description="Send /model command to Telegram bot for session model switching",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Using token from environment/.env (auto-detected)
+  ./scripts/set-session-model.py openrouter:sonnet 123456789
+
+  # Explicitly specify bot token (useful for multi-bot setups)
+  ./scripts/set-session-model.py nous:mimo "@hermes_bot" --token 123456:ABC-DEF...
+
+Token Resolution Order:
+  1. --token argument (highest priority)
+  2. TELEGRAM_BOT_TOKEN / TELEGRAM_TOKEN environment variable
+  3. ~/.hermes/.env file
+        """)
+    parser.add_argument("provider:model", help="Model specification (e.g., openrouter:sonnet)")
+    parser.add_argument("chat_id", help="Telegram chat ID or username")
+    parser.add_argument("--token", "-t", metavar="BOT_TOKEN",
+                        help="Explicitly specify Telegram bot token (overrides auto-detection)")
+
+    args = parser.parse_args()
+
+    provider_model = args.provider_model
+    chat_id = args.chat_id
 
     # Validate provider:model format
     if ':' not in provider_model:
@@ -90,8 +151,8 @@ def main():
     print(f"Sending command: {command}")
     print(f"To chat: {chat_id}")
 
-    # Get bot token
-    bot_token = get_telegram_bot_token()
+    # Get bot token (prioritize --token argument, then auto-detect)
+    bot_token = get_telegram_bot_token(explicit_token=args.token)
 
     # Send the /model command
     success = send_telegram_message(bot_token, chat_id, command)
