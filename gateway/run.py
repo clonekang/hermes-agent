@@ -4570,6 +4570,7 @@ class GatewayRunner:
         Supports:
           /model                              — interactive picker (Telegram/Discord) or text list
           /model <name>                       — switch for this session only
+          /model <provider>:<name>            — quick switch (e.g., anthropic:sonnet)
           /model <name> --global              — switch and persist to config.yaml
           /model <name> --provider <provider> — switch provider + model
           /model --provider <provider>        — switch to provider, auto-detect model
@@ -4764,6 +4765,7 @@ class GatewayRunner:
                 pass
 
             lines.append("`/model <name>` — switch model")
+            lines.append("`/model <provider>:<name>` — quick switch (e.g., anthropic:sonnet)")
             lines.append("`/model <name> --provider <slug>` — switch provider")
             lines.append("`/model <name> --global` — persist")
             return "\n".join(lines)

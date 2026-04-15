@@ -13,9 +13,10 @@ This module ties together the foundation layers:
 - ``hermes_cli.providers``        -- canonical provider identity + overlays
 - ``hermes_cli.model_normalize``  -- per-provider name formatting
 
-Provider switching uses the ``--provider`` flag exclusively.
-No colon-based ``provider:model`` syntax — colons are reserved for
-OpenRouter variant suffixes (``:free``, ``:extended``, ``:fast``).
+Provider switching supports:
+  - The ``--provider`` flag: `/model sonnet --provider anthropic`
+  - Colon-based syntax: `/model anthropic:sonnet-4-6`
+    (OpenRouter variant suffixes like `:free`, `:extended`, `:fast` are preserved)
 """
 
 from __future__ import annotations
@@ -261,6 +262,8 @@ class CustomAutoResult:
 def parse_model_flags(raw_args: str) -> tuple[str, str, bool]:
     """Parse --provider and --global flags from /model command args.
 
+    Supports `provider:model` colon syntax for quick switching.
+
     Returns (model_input, explicit_provider, is_global).
 
     Examples::
@@ -268,6 +271,8 @@ def parse_model_flags(raw_args: str) -> tuple[str, str, bool]:
         "sonnet"                         -> ("sonnet", "", False)
         "sonnet --global"                -> ("sonnet", "", True)
         "sonnet --provider anthropic"    -> ("sonnet", "anthropic", False)
+        "anthropic:sonnet-4-6"           -> ("sonnet-4-6", "anthropic", False)
+        "custom:my-ollama:qwen3.5"       -> ("qwen3.5", "custom:my-ollama", False)
         "--provider my-ollama"           -> ("", "my-ollama", False)
         "sonnet --provider anthropic --global" -> ("sonnet", "anthropic", True)
     """
@@ -292,6 +297,48 @@ def parse_model_flags(raw_args: str) -> tuple[str, str, bool]:
             i += 1
 
     model_input = " ".join(filtered).strip()
+
+    # Parse provider:model syntax (colon-separated)
+    # Allow multiple colons for custom providers like "custom:my-ollama:model-name"
+    if explicit_provider == "" and model_input and ":" in model_input:
+        colon_parts = model_input.split(":")
+        if len(colon_parts) >= 2:
+            first_part = colon_parts[0].lower()
+            second_part = colon_parts[1]
+
+            # Check if this looks like provider:model format
+            def _looks_like_provider_slug(slug: str) -> bool:
+                """Check if a string looks like a provider slug."""
+                slug_lower = slug.lower()
+                # Known providers
+                if slug_lower in {
+                    "anthropic", "openai", "google", "deepseek", "x-ai", "meta",
+                    "meta-llama", "qwen", "minimax", "nvidia", "moonshotai", "z-ai",
+                    "stepfun", "xiaomi", "arcee-ai", "openrouter", "nous", "local"
+                }:
+                    return True
+                # Custom provider pattern
+                if slug_lower.startswith("custom"):
+                    return True
+                # User-defined/custom endpoint: short alphanumeric, no special chars
+                # This catches slugs like "l18", "myserver", etc.
+                if len(slug) <= 20 and slug.replace("-", "").replace("_", "").isalnum():
+                    return True
+                return False
+
+            def _looks_like_model_name(name: str) -> bool:
+                """Check if a string looks like a model name."""
+                has_special = any(c in name for c in ["/", ".", "-", "_"])
+                return has_special or len(name) > 3
+
+            if _looks_like_provider_slug(first_part) and _looks_like_model_name(second_part):
+                if first_part.startswith("custom") and len(colon_parts) > 2:
+                    explicit_provider = f"{colon_parts[0]}:{colon_parts[1]}"
+                    model_input = ":".join(colon_parts[2:])
+                else:
+                    model_input = ":".join(colon_parts[1:])
+                    explicit_provider = colon_parts[0]
+
     return (model_input, explicit_provider, is_global)
 
 

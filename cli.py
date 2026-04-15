@@ -4645,6 +4645,7 @@ class HermesCLI:
         Supports:
           /model                              — show current model + usage hints
           /model <name>                       — switch for this session only
+          /model <provider>:<name>            — quick switch (e.g., anthropic:sonnet)
           /model <name> --global              — switch and persist to config.yaml
           /model <name> --provider <provider> — switch provider + model
           /model --provider <provider>        — switch to provider, auto-detect model
@@ -4691,6 +4692,7 @@ class HermesCLI:
                 _cprint("  No authenticated providers found.")
                 _cprint("")
                 _cprint("  /model <name>                        switch model")
+                _cprint("  /model <provider>:<name>             quick switch (e.g., anthropic:sonnet)")
                 _cprint("  /model --provider <slug>             switch provider")
                 return
 
