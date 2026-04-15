@@ -374,8 +374,15 @@ class APIServerAdapter(BasePlatformAdapter):
     and routes them through hermes-agent's AIAgent.
     """
 
-    def __init__(self, config: PlatformConfig):
+    def __init__(self, config: PlatformConfig, gateway_runner: Any = None):
+        """Initialize API server adapter.
+
+        Args:
+            config: Platform configuration
+            gateway_runner: Optional reference to GatewayRunner for session management
+        """
         super().__init__(config, Platform.API_SERVER)
+        self._gateway_runner = gateway_runner  # For session model override via admin API
         extra = config.extra or {}
         self._host: str = extra.get("host", os.getenv("API_SERVER_HOST", DEFAULT_HOST))
         self._port: int = int(extra.get("port", os.getenv("API_SERVER_PORT", str(DEFAULT_PORT))))
@@ -2300,6 +2307,84 @@ class APIServerAdapter(BasePlatformAdapter):
                 self._run_streams_created.pop(run_id, None)
 
     # ------------------------------------------------------------------
+    # Admin management API
+    # ------------------------------------------------------------------
+
+    async def _admin_set_session_model(self, request: "web.Request") -> "web.Response":
+        """POST /admin/sessions/{session_key}/model — Set session model override.
+
+        Request body:
+            {
+                "provider": "openrouter",
+                "model": "sonnet"
+            }
+
+        Response:
+            {
+                "success": true,
+                "message": "Model updated for session telegram:123456789",
+                "new_model": "claude-3-5-sonnet",
+                "target_provider": "openrouter"
+            }
+        """
+        # Require authentication for admin operations
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        if not self._gateway_runner:
+            return web.json_response(
+                {"error": "Gateway runner not available. Admin API requires gateway connection."},
+                status=501,
+            )
+
+        session_key = request.match_info["session_key"]
+
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, Exception):
+            return web.json_response(
+                {"error": "Invalid JSON in request body"},
+                status=400,
+            )
+
+        provider = body.get("provider")
+        model = body.get("model")
+
+        if not provider or not model:
+            return web.json_response(
+                {"error": "Both 'provider' and 'model' fields are required"},
+                status=400,
+            )
+
+        try:
+            result = self._gateway_runner.set_session_model_override(
+                session_key=session_key,
+                provider=provider,
+                model=model,
+            )
+
+            if result.get("success"):
+                return web.json_response({
+                    "success": True,
+                    "message": result.get("message", f"Model updated for session {session_key}"),
+                    "new_model": result.get("new_model"),
+                    "target_provider": result.get("target_provider"),
+                })
+            else:
+                return web.json_response({
+                    "success": False,
+                    "error": result.get("message", "Failed to set model"),
+                }, status=400)
+
+        except Exception as e:
+            logger.error("[api_server] Failed to set session model for %s: %s", session_key, e)
+            return web.json_response(
+                {"error": f"Failed to set session model: {str(e)}"},
+                status=500,
+            )
+
+    # ------------------------------------------------------------------
     # BasePlatformAdapter interface
     # ------------------------------------------------------------------
 
@@ -2333,6 +2418,8 @@ class APIServerAdapter(BasePlatformAdapter):
             # Structured event streaming
             self._app.router.add_post("/v1/runs", self._handle_runs)
             self._app.router.add_get("/v1/runs/{run_id}/events", self._handle_run_events)
+            # Admin management API (requires authentication)
+            self._app.router.add_post("/admin/sessions/{session_key}/model", self._admin_set_session_model)
             # Start background sweep to clean up orphaned (unconsumed) run streams
             sweep_task = asyncio.create_task(self._sweep_orphaned_runs())
             try:

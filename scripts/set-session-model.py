@@ -126,7 +126,8 @@ Token Resolution Order:
   2. TELEGRAM_BOT_TOKEN / TELEGRAM_TOKEN environment variable
   3. ~/.hermes/.env file
         """)
-    parser.add_argument("provider:model", help="Model specification (e.g., openrouter:sonnet)")
+    parser.add_argument("provider_model", metavar="PROVIDER:MODEL",
+                        help="Model specification (e.g., openrouter:sonnet)")
     parser.add_argument("chat_id", help="Telegram chat ID or username")
     parser.add_argument("--token", "-t", metavar="BOT_TOKEN",
                         help="Explicitly specify Telegram bot token (overrides auto-detection)")

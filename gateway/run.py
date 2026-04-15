@@ -2509,7 +2509,7 @@ class GatewayRunner:
             if not check_api_server_requirements():
                 logger.warning("API Server: aiohttp not installed")
                 return None
-            return APIServerAdapter(config)
+            return APIServerAdapter(config, gateway_runner=self)  # Pass gateway_runner for admin API
 
         elif platform == Platform.WEBHOOK:
             from gateway.platforms.webhook import WebhookAdapter, check_webhook_requirements
@@ -7694,6 +7694,121 @@ class GatewayRunner:
         """Return True if *agent_model* matches an active /model session override."""
         override = self._session_model_overrides.get(session_key)
         return override is not None and override.get("model") == agent_model
+
+    def set_session_model_override(
+        self,
+        session_key: str,
+        provider: str,
+        model: str,
+        current_provider: str = "openrouter",
+        current_model: str = "",
+        current_base_url: str = "",
+    ) -> dict:
+        """
+        Set the model override for a session (can be called from external scripts).
+
+        This method allows external processes to programmatically set the session-level
+        model override without going through the /model command.
+
+        Args:
+            session_key: The session identifier (e.g., "telegram:123456789")
+            provider: The provider slug (e.g., "openrouter", "anthropic", "nous")
+            model: The model name or alias (e.g., "sonnet", "mimo")
+            current_provider: Current active provider (default: "openrouter")
+            current_model: Current active model (default: "")
+            current_base_url: Current base URL (default: "")
+
+        Returns:
+            dict with keys:
+                - success: bool
+                - message: str
+                - new_model: str (if successful)
+                - target_provider: str (if successful)
+        """
+        import yaml
+        from hermes_cli.model_switch import switch_model as _switch_model
+
+        config_path = _hermes_home / "config.yaml"
+        user_provs = {}
+        custom_provs = []
+
+        try:
+            if config_path.exists():
+                with open(config_path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                user_provs = cfg.get("providers") or {}
+                try:
+                    from hermes_cli.config import get_compatible_custom_providers
+                    custom_provs = get_compatible_custom_providers(cfg)
+                except Exception:
+                    custom_provs = cfg.get("custom_providers") or []
+        except Exception:
+            pass
+
+        # Perform the model switch using the shared pipeline
+        result = _switch_model(
+            raw_input=model,
+            current_provider=current_provider,
+            current_model=current_model,
+            current_base_url=current_base_url,
+            current_api_key="",
+            is_global=False,  # Session-level only, not persistent
+            explicit_provider=provider,
+            user_providers=user_provs,
+            custom_providers=custom_provs,
+        )
+
+        if not result.success:
+            return {
+                "success": False,
+                "message": result.error_message,
+            }
+
+        # Update cached agent in-place if exists
+        _cache_lock = getattr(self, "_agent_cache_lock", None)
+        _cache = getattr(self, "_agent_cache", None)
+        if _cache_lock and _cache is not None:
+            with _cache_lock:
+                cached_entry = _cache.get(session_key)
+            if cached_entry and cached_entry[0] is not None:
+                try:
+                    cached_entry[0].switch_model(
+                        new_model=result.new_model,
+                        new_provider=result.target_provider,
+                        api_key=result.api_key,
+                        base_url=result.base_url,
+                        api_mode=result.api_mode,
+                    )
+                except Exception as exc:
+                    logger.warning("In-place model switch failed for cached agent: %s", exc)
+
+        # Store session override
+        self._session_model_overrides[session_key] = {
+            "model": result.new_model,
+            "provider": result.target_provider,
+            "api_key": result.api_key,
+            "base_url": result.base_url,
+            "api_mode": result.api_mode,
+        }
+
+        # Store model note for next message
+        if not hasattr(self, "_pending_model_notes"):
+            self._pending_model_notes = {}
+        self._pending_model_notes[session_key] = (
+            f"[Note: model was just switched from {current_model} to {result.new_model} "
+            f"via {result.provider_label or result.target_provider}. "
+            f"Adjust your self-identification accordingly.]"
+        )
+
+        # Evict cached agent so next turn uses the new model
+        self._evict_cached_agent(session_key)
+
+        return {
+            "success": True,
+            "message": f"Model switched to {result.new_model} via {result.provider_label or result.target_provider}",
+            "new_model": result.new_model,
+            "target_provider": result.target_provider,
+        }
 
     def _evict_cached_agent(self, session_key: str) -> None:
         """Remove a cached agent for a session (called on /new, /model, etc)."""
