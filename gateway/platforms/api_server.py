@@ -909,7 +909,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 return time.monotonic()
 
             # Stream content chunks as they arrive from the agent
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             while True:
                 try:
                     delta = await loop.run_in_executor(None, lambda: stream_q.get(timeout=0.5))
@@ -1248,7 +1248,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     await _emit_text_delta(it)
                 # Other types (non-string, non-tuple) are silently dropped.
 
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             while True:
                 try:
                     item = await loop.run_in_executor(None, lambda: stream_q.get(timeout=0.5))
@@ -2011,7 +2011,7 @@ class APIServerAdapter(BasePlatformAdapter):
         callers (e.g. the SSE writer) to call ``agent.interrupt()`` from
         another thread to stop in-progress LLM calls.
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _run():
             agent = self._create_agent(
