@@ -296,27 +296,26 @@ class GatewayStreamConsumer:
                 # Decide whether to flush an edit
                 now = time.monotonic()
                 elapsed = now - self._last_edit_time
-                pending_chars = max(0, len(self._accumulated) - self._last_flushed_len)
-                # Keep edit_interval as a hard throttle (important for Telegram
-                # flood control). buffer_threshold is only used when interval
-                # throttling is explicitly disabled (<= 0).
-                timed_ready = (
-                    elapsed >= self._current_edit_interval and pending_chars > 0
-                ) if self._current_edit_interval > 0 else (
-                    pending_chars >= self.cfg.buffer_threshold
-                )
+
                 should_edit = (
                     got_done
                     or got_segment_break
                     or commentary_text is not None
-                    or timed_ready
                 )
+
                 if not self.cfg.buffer_only:
-                    should_edit = should_edit or (
-                        (elapsed >= self._current_edit_interval
-                            and self._accumulated)
-                        or len(self._accumulated) >= self.cfg.buffer_threshold
+                    # In non-buffer-only mode, also check time-based edit triggers.
+                    pending_chars = max(0, len(self._accumulated) - self._last_flushed_len)
+                    # Keep edit_interval as a hard throttle (important for Telegram
+                    # flood control). buffer_threshold is only used when interval
+                    # throttling is explicitly disabled (<= 0).
+                    timed_ready = (
+                        elapsed >= self._current_edit_interval and pending_chars > 0
+                    ) if self._current_edit_interval > 0 else (
+                        pending_chars >= self.cfg.buffer_threshold
                     )
+                    should_edit = should_edit or timed_ready
+
 
                 current_update_visible = False
                 if should_edit and self._accumulated:
