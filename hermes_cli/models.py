@@ -2050,8 +2050,8 @@ def validate_requested_model(
                 )
 
             return {
-                "accepted": False,
-                "persist": False,
+                "accepted": True,
+                "persist": True,
                 "recognized": False,
                 "message": message,
             }
@@ -2064,8 +2064,8 @@ def validate_requested_model(
             message += f"\n  If this server expects `/v1`, try base URL: `{probe.get('suggested_base_url')}`"
 
         return {
-            "accepted": False,
-            "persist": False,
+            "accepted": True,
+            "persist": True,
             "recognized": False,
             "message": message,
         }
@@ -2143,11 +2143,12 @@ def validate_requested_model(
                 suggestion_text = "\n  Similar models: " + ", ".join(f"`{s}`" for s in suggestions)
 
         return {
-            "accepted": False,
-            "persist": False,
+            "accepted": True,
+            "persist": True,
             "recognized": False,
             "message": (
-                f"Model `{requested}` was not found in this provider's model listing."
+                f"Note: `{requested}` was not found in this provider's model listing. "
+                f"It may still work if your account has access to it."
                 f"{suggestion_text}"
             ),
         }
