@@ -74,6 +74,7 @@ AUTHOR_MAP = {
     "109555139+davetist@users.noreply.github.com": "davetist",
     "39405770+yyq4193@users.noreply.github.com": "yyq4193",
     "Asunfly@users.noreply.github.com": "Asunfly",
+    "2500400+honghua@users.noreply.github.com": "honghua",
     # contributors (manual mapping from git names)
     "ahmedsherif95@gmail.com": "asheriif",
     "liujinkun@bytedance.com": "liujinkun2025",
@@ -207,6 +208,7 @@ AUTHOR_MAP = {
     "cola-runner@users.noreply.github.com": "cola-runner",
     "ygd58@users.noreply.github.com": "ygd58",
     "vominh1919@users.noreply.github.com": "vominh1919",
+    "iamagenius00@users.noreply.github.com": "iamagenius00",
     "trevmanthony@gmail.com": "trevthefoolish",
     "ziliangpeng@users.noreply.github.com": "ziliangpeng",
     "centripetal-star@users.noreply.github.com": "centripetal-star",
@@ -263,6 +265,9 @@ AUTHOR_MAP = {
     "asurla@nvidia.com": "anniesurla",
     "limkuan24@gmail.com": "WideLee",
     "aviralarora002@gmail.com": "AviArora02-commits",
+    "junminliu@gmail.com": "JimLiu",
+    "jarvischer@gmail.com": "maxchernin",
+    "levantam.98.2324@gmail.com": "LVT382009",
 }
 
 
