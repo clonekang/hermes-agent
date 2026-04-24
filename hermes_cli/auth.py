@@ -22,6 +22,7 @@ import shutil
 import shlex
 import ssl
 import stat
+import sys
 import base64
 import hashlib
 import subprocess
@@ -223,6 +224,14 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         inference_base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
         api_key_env_vars=("DASHSCOPE_API_KEY",),
         base_url_env_var="DASHSCOPE_BASE_URL",
+    ),
+    "alibaba-coding-plan": ProviderConfig(
+        id="alibaba-coding-plan",
+        name="Alibaba Cloud (Coding Plan)",
+        auth_type="api_key",
+        inference_base_url="https://coding-intl.dashscope.aliyuncs.com/v1",
+        api_key_env_vars=("ALIBABA_CODING_PLAN_API_KEY", "DASHSCOPE_API_KEY"),
+        base_url_env_var="ALIBABA_CODING_PLAN_BASE_URL",
     ),
     "minimax-cn": ProviderConfig(
         id="minimax-cn",
@@ -619,7 +628,25 @@ def _oauth_trace(event: str, *, sequence_id: Optional[str] = None, **fields: Any
 # =============================================================================
 
 def _auth_file_path() -> Path:
-    return get_hermes_home() / "auth.json"
+    path = get_hermes_home() / "auth.json"
+    # Seat belt: if pytest is running and HERMES_HOME resolves to the real
+    # user's auth store, refuse rather than silently corrupt it. This catches
+    # tests that forgot to monkeypatch HERMES_HOME, tests invoked without the
+    # hermetic conftest, or sandbox escapes via threads/subprocesses. In
+    # production (no PYTEST_CURRENT_TEST) this is a single dict lookup.
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        real_home_auth = (Path.home() / ".hermes" / "auth.json").resolve(strict=False)
+        try:
+            resolved = path.resolve(strict=False)
+        except Exception:
+            resolved = path
+        if resolved == real_home_auth:
+            raise RuntimeError(
+                f"Refusing to touch real user auth store during test run: {path}. "
+                "Set HERMES_HOME to a tmp_path in your test fixture, or run "
+                "via scripts/run_tests.sh for hermetic CI-parity env."
+            )
+    return path
 
 
 def _auth_lock_path() -> Path:
@@ -928,10 +955,12 @@ def clear_provider_auth(provider_id: Optional[str] = None) -> bool:
             del pool[target]
             cleared = True
 
-        if not cleared:
-            return False
         if auth_store.get("active_provider") == target:
             auth_store["active_provider"] = None
+            cleared = True
+
+        if not cleared:
+            return False
         _save_auth_store(auth_store)
     return True
 
@@ -1006,6 +1035,8 @@ def resolve_provider(
         "step": "stepfun", "stepfun-coding-plan": "stepfun",
         "arcee-ai": "arcee", "arceeai": "arcee",
         "minimax-china": "minimax-cn", "minimax_cn": "minimax-cn",
+        "alibaba_coding": "alibaba-coding-plan", "alibaba-coding": "alibaba-coding-plan",
+        "alibaba_coding_plan": "alibaba-coding-plan",
         "claude": "anthropic", "claude-code": "anthropic",
         "github": "copilot", "github-copilot": "copilot",
         "github-models": "copilot", "github-model": "copilot",
@@ -1680,6 +1711,24 @@ def resolve_codex_runtime_credentials(
 # TLS verification helper
 # =============================================================================
 
+def _default_verify() -> bool | ssl.SSLContext:
+    """Platform-aware default SSL verify for httpx clients.
+
+    On macOS with Homebrew Python, the system OpenSSL cannot locate the
+    system trust store and valid public certs fail verification. When
+    certifi is importable we pin its bundle explicitly; elsewhere we
+    defer to httpx's built-in default (certifi via its own dependency).
+    Mirrors the weixin fix in 3a0ec1d93.
+    """
+    if sys.platform == "darwin":
+        try:
+            import certifi
+            return ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            pass
+    return True
+
+
 def _resolve_verify(
     *,
     insecure: Optional[bool] = None,
@@ -1698,6 +1747,7 @@ def _resolve_verify(
         or tls_state.get("ca_bundle")
         or os.getenv("HERMES_CA_BUNDLE")
         or os.getenv("SSL_CERT_FILE")
+        or os.getenv("REQUESTS_CA_BUNDLE")
     )
 
     if effective_insecure:
@@ -1709,9 +1759,9 @@ def _resolve_verify(
                 "CA bundle path does not exist: %s — falling back to default certificates",
                 ca_path,
             )
-            return True
+            return _default_verify()
         return ssl.create_default_context(cafile=ca_path)
-    return True
+    return _default_verify()
 
 
 # =============================================================================
@@ -2778,6 +2828,46 @@ def _update_config_for_provider(
     return config_path
 
 
+def _get_config_provider() -> Optional[str]:
+    """Return model.provider from config.yaml, normalized, if present."""
+    try:
+        config = read_raw_config()
+    except Exception:
+        return None
+    if not config:
+        return None
+    model = config.get("model")
+    if not isinstance(model, dict):
+        return None
+    provider = model.get("provider")
+    if not isinstance(provider, str):
+        return None
+    provider = provider.strip().lower()
+    return provider or None
+
+
+def _config_provider_matches(provider_id: Optional[str]) -> bool:
+    """Return True when config.yaml currently selects *provider_id*."""
+    if not provider_id:
+        return False
+    return _get_config_provider() == provider_id.strip().lower()
+
+
+def _logout_default_provider_from_config() -> Optional[str]:
+    """Fallback logout target when auth.json has no active provider.
+
+    `hermes logout` historically keyed off auth.json.active_provider only.
+    That left users stuck when auth state had already been cleared but
+    config.yaml still selected an OAuth provider such as openai-codex for the
+    agent model: there was no active auth provider to target, so logout printed
+    "No provider is currently logged in" and never reset model.provider.
+    """
+    provider = _get_config_provider()
+    if provider in {"nous", "openai-codex"}:
+        return provider
+    return None
+
+
 def _reset_config_provider() -> Path:
     """Reset config.yaml provider back to auto after logout."""
     config_path = get_config_path()
@@ -3476,15 +3566,16 @@ def logout_command(args) -> None:
         raise SystemExit(1)
 
     active = get_active_provider()
-    target = provider_id or active
+    target = provider_id or active or _logout_default_provider_from_config()
 
     if not target:
         print("No provider is currently logged in.")
         return
 
     provider_name = PROVIDER_REGISTRY[target].name if target in PROVIDER_REGISTRY else target
+    config_matches = _config_provider_matches(target)
 
-    if clear_provider_auth(target):
+    if clear_provider_auth(target) or config_matches:
         _reset_config_provider()
         print(f"Logged out of {provider_name}.")
         if os.getenv("OPENROUTER_API_KEY"):
